@@ -1,0 +1,69 @@
+---
+title: "goga-assets-data-clean"
+format: html
+---
+
+```{r}
+# Set up 
+library(tidyverse)
+library(here)
+library(readxl)
+library(writexl)
+```
+
+
+```{r}
+# Read in data 
+asset_facility <- read_excel(here("ccva", "data", "Asset_Code_and_Facility_Type_Reference_List.xlsx"), sheet = "export")
+
+goga_lat_lon <- read_excel(here("ccva", "data", "GOGA_Location_Information.xlsx"), sheet = "GIS LAT _LONG")
+
+goga_location_info <- read_excel(here("ccva", "data", "GOGA_Location_Information.xlsx"), sheet = "Location Information")
+```
+
+
+```{r}
+# Clean column names by removing spaces
+names(goga_lat_lon) <- gsub(" ", "", names(goga_lat_lon))
+names(goga_location_info) <- gsub(" ", "", names(goga_location_info))
+
+# Clean columns AssetCode and FacilityType to be numeric 
+goga_lat_lon <- goga_lat_lon |> 
+  mutate(AssetCode = as.numeric(AssetCode),
+         FacilityType = as.numeric(FacilityType))
+goga_location_info <- goga_location_info |> 
+  mutate(AssetCode = as.numeric(AssetCode),
+         FacilityType = as.numeric(FacilityType))
+  
+```
+
+
+```{r}
+# Join asset code and facility type info to goga_lat_lon
+goga_assets <- goga_lat_lon |>
+  # Join datasets 
+  left_join(
+    asset_facility |>
+      select(AssetCode, FacilityType, AssetDescription, FacilityTypeDescription),
+    by = c("AssetCode", "FacilityType")) |> 
+  # relocate columns 
+  relocate(AssetDescription, .after = AssetCode) |> 
+  relocate(FacilityTypeDescription, .after = FacilityType)
+  
+```
+
+```{r}
+# Join goga assets data to location info data
+goga_assets <- goga_assets |> 
+  left_join(goga_location_info |>
+      select(Location, AssetCode, FacilityType, ParkName, FBMSID, API, FCI, CRV, Rank, 'DM&R', OB, Qty, UM, HistoricStatus, YearBlt, 'CRIS-HS', TREADTYP, LANDTYPE, DOICode), by = c("Location", "AssetCode", "FacilityType")) |> 
+  # relocate columns 
+  relocate(ParkName, .after = Park) 
+```
+
+```{r}
+# Export dataframe to Excel
+write_xlsx(goga_assets, "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned.xlsx")
+
+```
+
