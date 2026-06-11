@@ -1,3 +1,7 @@
+# Data folders at any depth 
+**/data/
+
+
 # History files
 .Rhistory
 .Rapp.history
