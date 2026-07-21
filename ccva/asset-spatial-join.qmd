@@ -1,19 +1,22 @@
 ---
-title: "asset-spatial-join"
+title: "Spatial Join of Asset Data for Climate Change Vulnerability Assessment"
 format: html
+author: "Jordan Sibley"
+date: "7/20/2026"
 ---
 
+## Set up
 ```{r}
+library(tidyverse)
 library(sf)
-library(dplyr)
 library(readxl)
 library(leaflet)
 library(writexl)
+library(testthat)
 ```
 
-
 ```{r}
-# File paths
+# Data File paths
 
 gdb_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/CCVA-asset-classifcation.gdb"
 
@@ -21,27 +24,14 @@ fc_name <- "GOGA_FACILITY_BuildingsAndStructures_py_20260520_ExportFeatures"
 
 excel_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned.xlsx"
 
-output_excel <- "goga-assets-cleaned-with-contributing-flag.xlsx"
-```
-
-```{r}
-# MIGHT NOT USE
-goga_buildings_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/GOGA_Buildings.gdb"
-
-GOGA_buildings <- st_read(
-  dsn = goga_buildings_path,
-  layer = "GOGA_FACILITY_Buildings_py",
-  quiet = FALSE
-)
-
-# Check field names
-names(GOGA_buildings)
+output_excel <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned-with-flag.xlsx"
 ```
 
 
+## Read in data
+### Asset polygon layer with cultural resource information
 ```{r}
 # Read polygon layer
-
 buildings <- st_read(
   dsn = gdb_path,
   layer = fc_name,
@@ -56,7 +46,7 @@ buildings <- buildings |>
 names(buildings)
 ```
 
-
+### GOGA asset tabular data 
 ```{r}
 # Read asset spreadsheet
 assets <- read_excel(excel_path, sheet = "Sheet1")
@@ -67,29 +57,18 @@ assets <- assets |>
     PrimaryLatitude = gsub("\\+", "", PrimaryLatitude),
     PrimaryLongitude = gsub("\\+", "", PrimaryLongitude))|>
   mutate(PrimaryLatitude = as.numeric(PrimaryLatitude),
-         PrimaryLongitude = as.numeric(PrimaryLongitude)) 
+         PrimaryLongitude = as.numeric(PrimaryLongitude)) |> 
+  # rename Location to LocationID
+  rename(LocationID = Location)
 
-# Filter rows without lat lon points 
+# Create rowID column to maintain row order at the end
+assets <- assets |> 
+  mutate(RowID = row_number())
+
+# Filter out rows that are missing lat lon points 
 assets_point <- assets |> 
   filter(!is.na(PrimaryLatitude) | !is.na(PrimaryLongitude))
 ```
-
-
-```{r}
-# Identify rows with missing lat lon points 
-assets_missing_point <- assets |> 
-  filter(is.na(PrimaryLatitude) | is.na(PrimaryLongitude))
-
-# See if missing rows are in GOGA_Building via Location ID
-matches_GOGA_build <- assets_missing_point |> 
-  filter(Location %in% GOGA_buildings$FACLOCID)
-
-# See if missing rows are in buildings dataset via Location ID
-matches_buildings <- assets_missing_point |> 
-  filter(Location %in% buildings$FACLOCID)
-```
-
-80 rows within assets dataset do not have a lat lon point. Of those 80, only 7 have a matching Location ID within GOGA_Buildings dataset and 1 has a matching Location ID within buildings dataset.  Need to decide if its worth it? Might be wiser to go through and assign lat lon point to missing rows 
 
 ```{r}
 # Convert spreadsheet coordinates to sf points
@@ -107,6 +86,39 @@ assets_sf <- st_transform(
 )
 ```
 
+### Finding ways to fill in missing data
+```{r}
+# MIGHT NOT USE
+goga_buildings_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/GOGA_Buildings.gdb"
+
+GOGA_buildings <- st_read(
+  dsn = goga_buildings_path,
+  layer = "GOGA_FACILITY_Buildings_py",
+  quiet = FALSE
+)
+
+# Check field names
+names(GOGA_buildings)
+```
+
+```{r}
+# Identify rows with missing lat lon points 
+assets_missing_point <- assets |> 
+  filter(is.na(PrimaryLatitude) | is.na(PrimaryLongitude))
+
+# See if missing rows are in GOGA_Building via Location ID
+matches_GOGA_build <- assets_missing_point |> 
+  filter(LocationID %in% GOGA_buildings$FACLOCID)
+
+# See if missing rows are in buildings dataset via Location ID
+matches_buildings <- assets_missing_point |> 
+  filter(LocationID %in% buildings$FACLOCID)
+```
+
+80 rows within assets dataset do not have a lat lon point. Of those 80, only 7 have a matching Location ID within GOGA_Buildings dataset and 1 has a matching Location ID within buildings dataset. Need to decide if its worth it? Might be wiser to go through and assign lat lon point to missing rows
+
+
+## Visual Check
 ```{r}
 # Get buildings dataset in form for leaflet map
 buildings_leaflet <- buildings |>
@@ -155,32 +167,38 @@ leaflet() |>
 
 ```
 
-
+## Join by FACLOCID number
 ```{r}
-# Spatial join
-
-# First make valid 
+# Make polygons valid 
 buildings_fixed <- st_make_valid(buildings_leaflet)
 
-# Perform spatial join 
-assets_joined <- st_join(
-  assets_sf,
-  buildings_fixed |> 
-    select(CONTRIBRES),
-  join = st_within,
-  left = TRUE
-)
+# Clean FACLOCID in buildings_fixed (to account for the duplicate id numbers that appear)
+# From an examaninaton and cross checking the first number in the series is the current ID
+buildings_fixed <- buildings_fixed |> 
+  mutate(FACLOCID = sub(";.*", "", FACLOCID))
 
-# Determine how many rows are still missing contributing resource flag
-assets_joined_missing <- assets_joined |> 
-  filter(is.na(CONTRIBRES))
-nrow(assets_joined_missing)
+# Rename LocationID column to be FACLOCID for join
+assets_facloc <- assets_sf |>
+  rename(FACLOCID = LocationID)
+
+# Perform left join to match asset data to CONTRIBRES column by matching ID 
+assets_facloc_joined <- assets_facloc |>
+  left_join(buildings_fixed |>
+              st_drop_geometry() |>
+              select(FACLOCID, CONTRIBRES),
+            by = "FACLOCID")
+
+# View how many tagged
+sum(!is.na(assets_facloc_joined$CONTRIBRES))
 ```
-681 rows out of 1332 (51%) did not receive the contributing resource tag from the spatial join.
-
+424 asset rows were matched with contributing resource tag from matching FACLOCID number
 
 ```{r}
 # Recreate map with only missed tagged points 
+
+# Filter to rows that do not contain contribres tag
+assets_needing_spatial <- assets_facloc_joined |>
+  filter(is.na(CONTRIBRES))
 
 # Create map
 #--------------------------------------------------
@@ -203,7 +221,7 @@ leaflet() |>
   ) |> 
   
    addCircleMarkers(
-    data = assets_joined_missing,
+    data = assets_needing_spatial,
     radius = 4,
     color = "red",
     stroke = FALSE,
@@ -224,25 +242,163 @@ leaflet() |>
 
 ```
 
-Next step: 
+There are still plenty of points that could be matched by the spatial join.
 
-Try one more join (of just the missing points) with FACLOCID to see if there are a few more that could get labeled. 
-
-HAVE NOT TRIED PAST THIS
+## Spatial join for the untagged set
 ```{r}
-# Remove geometry before exporting
-#assets_output <- assets_joined %>%
-#  st_drop_geometry()
+# Perform spatial join 
+assets_spatial <- st_join(
+  assets_needing_spatial,
+  buildings_fixed |> 
+    select(CONTRIBRES),
+  join = st_within,
+  left = TRUE
+)
+
+# Combine 2 CONTRIBRES columns 
+assets_spatial <- assets_spatial |>
+  mutate(CONTRIBRES = coalesce(CONTRIBRES.x, CONTRIBRES.y)) |> 
+  # remove x and y column 
+  select(c(-CONTRIBRES.x, -CONTRIBRES.y))
+
+# View how many are still untagged (there should def be a decent amount from visual check in maps)
+sum(!is.na(assets_spatial$CONTRIBRES))
+
+```
+Only 332 rows out of 1387 (23%) are missing the contributing resource tag.
+
+## Recombine data 
+```{r}
+# Get rows from left join that did not result in NA value
+assets_facloc_tagged <- assets_facloc_joined |>
+  filter(!is.na(CONTRIBRES))
+
+# Join with spatial join (which also contains the rows that did not receive a tag)
+assets_sp_left_join <- bind_rows(assets_facloc_tagged, assets_spatial)
+
+# Rename FACLOCID to LocationID and drop geometry
+assets_sp_left_join <- assets_sp_left_join |> 
+  rename(LocationID = FACLOCID) |> 
+  st_drop_geometry()
+
+# Add back the rows that did not include lat lon points and reorder by RowID
+assets_final <- bind_rows(assets_sp_left_join, assets_missing_point) |>
+  arrange(RowID)
+
+# Confirm final asset data contains the same number of rows are original asset data
+# test_that("Final dataset has same number of rows as original asset dataset", {
+#   expect_equal(nrow(assets_final), nrow(assets))
+# })
+# COMMENTED OUT FOR RUNNING PURPOSES
+```
+Error message: 
+── Failure: Final dataset has same number of rows as original asset dataset ──────────────────────────────────────────────────────────────
+Expected `nrow(assets_final)` to equal `nrow(assets)`.
+Differences:
+1/1 mismatches
+[1] 1442 - 1387 == 55
+
+## Figure out error
+```{r}
+# Find duplicate FACLOCID 
+buildings_fixed |>
+  st_drop_geometry() |>
+  count(FACLOCID) |>
+  filter(n > 1) |>
+  arrange(desc(n))
+
 ```
 
+There are 44 different FACLOCID numbers that appear more than once
+```{r}
+# Did the FACLOCID join increase the row count?
+nrow(assets_facloc)
+nrow(assets_facloc_joined)
+
+# Did the spatial join increase the row count?
+nrow(assets_needing_spatial)
+nrow(assets_spatial)
+```
+The FACLOCID join increased the row count by 39
+The spatial join increased the row count by 16
+
+## Fix duplicated rows from the joins
+```{r}
+# Find rows that got duplicated
+dup_rowids <- assets_final |>
+  count(RowID) |>
+  filter(n > 1)
+
+# Inspect what is happening
+assets_final |>
+  semi_join(dup_rowids, by = "RowID") |>
+  arrange(RowID) |> 
+  select(RowID, Description, CONTRIBRES)
+```
+
+It seems some of them were duplicated due to multiple values for CONTRIBRES, it also seems that things got messed up due to some buildings which contain separate polygons contain the same FACLOCID and from the visual check there are some overlaping polygons
+
+```{r}
+# Create a summary for all responses
+duplicate_summary <- assets_final |>
+  group_by(RowID) |>
+  summarise(
+    CONTRIBRES_options = paste(
+      unique(CONTRIBRES),
+      collapse = "; "
+    ),
+    n_options = n_distinct(CONTRIBRES),
+    .groups = "drop"
+  )
+
+# Create a single record per RowID
+assets_final_dedup <- assets_final |>
+  group_by(RowID) |>
+  summarise(
+    across(everything(), first),
+    .groups = "drop"
+  )
+
+# Add the list of possible values
+assets_final_dedup <- assets_final_dedup |>
+  left_join(
+    duplicate_summary,
+    by = "RowID"
+  )
+
+# Flag ambiguous cases column 
+assets_final_dedup <- assets_final_dedup |>
+  mutate(CONTRIBRES = if_else( n_options > 1,
+                               "Multiple responses",
+                               CONTRIBRES),
+         CONTRIBRES_options = if_else( n_options > 1,
+                                       CONTRIBRES_options,
+                                       NA_character_)
+         )
+
+# Recheck row count
+test_that("Final dataset has same number of rows as original asset dataset", {
+  expect_equal(nrow(assets_final_dedup), nrow(assets))
+})
+```
+
+## Final clean and export
+```{r}
+# Clean columns for export
+assets_final_dedup <- assets_final_dedup |> 
+  # remove n_options and RowID column
+  select(c(-n_options, -RowID)) |> 
+  # rename CONTRIBRES to ContributingResourceFlag
+  rename(ContributingResourceFlag = CONTRIBRES,
+         FlagOptions = CONTRIBRES_options)
+```
 
 ```{r}
 # Write result to Excel
-#write_xlsx(
-#  assets_output,
-#  output_excel
-#)
-
-#cat("Done. Output saved to:", output_excel)
+# write_xlsx(
+#   assets_final_dedup,
+#   output_excel
+# )
+# 
+# cat("Done. Output saved to:", output_excel)
 ```
-
