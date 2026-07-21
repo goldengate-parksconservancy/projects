@@ -1,0 +1,248 @@
+---
+title: "asset-spatial-join"
+format: html
+---
+
+```{r}
+library(sf)
+library(dplyr)
+library(readxl)
+library(leaflet)
+library(writexl)
+```
+
+
+```{r}
+# File paths
+
+gdb_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/CCVA-asset-classifcation.gdb"
+
+fc_name <- "GOGA_FACILITY_BuildingsAndStructures_py_20260520_ExportFeatures"
+
+excel_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned.xlsx"
+
+output_excel <- "goga-assets-cleaned-with-contributing-flag.xlsx"
+```
+
+```{r}
+# MIGHT NOT USE
+goga_buildings_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/GOGA_Buildings.gdb"
+
+GOGA_buildings <- st_read(
+  dsn = goga_buildings_path,
+  layer = "GOGA_FACILITY_Buildings_py",
+  quiet = FALSE
+)
+
+# Check field names
+names(GOGA_buildings)
+```
+
+
+```{r}
+# Read polygon layer
+
+buildings <- st_read(
+  dsn = gdb_path,
+  layer = fc_name,
+  quiet = FALSE
+)
+
+# Transform CRS to WGS84 
+buildings <- buildings |> 
+  st_transform(4326) 
+
+# Check field names
+names(buildings)
+```
+
+
+```{r}
+# Read asset spreadsheet
+assets <- read_excel(excel_path, sheet = "Sheet1")
+
+# Remove characters (+) from lat and lon columns and convert to numeric
+assets <- assets |> 
+  mutate(
+    PrimaryLatitude = gsub("\\+", "", PrimaryLatitude),
+    PrimaryLongitude = gsub("\\+", "", PrimaryLongitude))|>
+  mutate(PrimaryLatitude = as.numeric(PrimaryLatitude),
+         PrimaryLongitude = as.numeric(PrimaryLongitude)) 
+
+# Filter rows without lat lon points 
+assets_point <- assets |> 
+  filter(!is.na(PrimaryLatitude) | !is.na(PrimaryLongitude))
+```
+
+
+```{r}
+# Identify rows with missing lat lon points 
+assets_missing_point <- assets |> 
+  filter(is.na(PrimaryLatitude) | is.na(PrimaryLongitude))
+
+# See if missing rows are in GOGA_Building via Location ID
+matches_GOGA_build <- assets_missing_point |> 
+  filter(Location %in% GOGA_buildings$FACLOCID)
+
+# See if missing rows are in buildings dataset via Location ID
+matches_buildings <- assets_missing_point |> 
+  filter(Location %in% buildings$FACLOCID)
+```
+
+80 rows within assets dataset do not have a lat lon point. Of those 80, only 7 have a matching Location ID within GOGA_Buildings dataset and 1 has a matching Location ID within buildings dataset.  Need to decide if its worth it? Might be wiser to go through and assign lat lon point to missing rows 
+
+```{r}
+# Convert spreadsheet coordinates to sf points
+assets_sf <- st_as_sf(
+  assets_point,
+  coords = c("PrimaryLongitude", "PrimaryLatitude"),
+  crs = 4326,      # WGS84 lat/long
+  remove = FALSE
+)
+
+# Reproject points to polygon CRS (WGS84)
+assets_sf <- st_transform(
+  assets_sf,
+  st_crs(buildings)
+)
+```
+
+```{r}
+# Get buildings dataset in form for leaflet map
+buildings_leaflet <- buildings |>
+  st_zm() |>
+  st_cast("MULTIPOLYGON") 
+
+# Create map
+#--------------------------------------------------
+leaflet() |> 
+  
+  addProviderTiles(providers$Esri.WorldImagery, group = "Aerial") |> 
+  
+  addProviderTiles(providers$CartoDB.Positron, group = "Basemap") |> 
+  
+  addPolygons(
+    data = buildings_leaflet,
+    color = "blue",
+    weight = 1,
+    fillOpacity = 0.3,
+     popup = ~ paste(
+       "<b>Resource Name:</b>", RESNAME,
+       "<b>Contributing Resource Flag:</b>", CONTRIBRES
+    ),
+    group = "Resource Polygons"
+  ) |> 
+  
+   addCircleMarkers(
+    data = assets_sf,
+    radius = 4,
+    color = "red",
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    popup = ~ paste(
+      "<b>Description:</b>", Description,
+      "<b>Latitude:</b>",PrimaryLatitude,
+      "<br><b>Longitude:</b>",PrimaryLongitude
+    ),
+    group = "Asset Points"
+   ) |> 
+  
+   addLayersControl(
+     overlayGroups = c("Resource Polygons", "Asset Points"),
+     baseGroups = c("Aerial", "Basemap"),
+     options = layersControlOptions(collapsed = FALSE)
+  )
+
+```
+
+
+```{r}
+# Spatial join
+
+# First make valid 
+buildings_fixed <- st_make_valid(buildings_leaflet)
+
+# Perform spatial join 
+assets_joined <- st_join(
+  assets_sf,
+  buildings_fixed |> 
+    select(CONTRIBRES),
+  join = st_within,
+  left = TRUE
+)
+
+# Determine how many rows are still missing contributing resource flag
+assets_joined_missing <- assets_joined |> 
+  filter(is.na(CONTRIBRES))
+nrow(assets_joined_missing)
+```
+681 rows out of 1332 (51%) did not receive the contributing resource tag from the spatial join.
+
+
+```{r}
+# Recreate map with only missed tagged points 
+
+# Create map
+#--------------------------------------------------
+leaflet() |> 
+  
+  addProviderTiles(providers$Esri.WorldImagery, group = "Aerial") |> 
+  
+  addProviderTiles(providers$CartoDB.Positron, group = "Basemap") |> 
+  
+  addPolygons(
+    data = buildings_leaflet,
+    color = "blue",
+    weight = 1,
+    fillOpacity = 0.3,
+     popup = ~ paste(
+       "<b>Resource Name:</b>", RESNAME,
+       "<b>Contributing Resource Flag:</b>", CONTRIBRES
+    ),
+    group = "Resource Polygons"
+  ) |> 
+  
+   addCircleMarkers(
+    data = assets_joined_missing,
+    radius = 4,
+    color = "red",
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    popup = ~ paste(
+      "<b>Description:</b>", Description,
+      "<b>Latitude:</b>",PrimaryLatitude,
+      "<br><b>Longitude:</b>",PrimaryLongitude
+    ),
+    group = "Asset Points"
+   ) |> 
+  
+   addLayersControl(
+     overlayGroups = c("Resource Polygons", "Asset Points"),
+     baseGroups = c("Aerial", "Basemap"),
+     options = layersControlOptions(collapsed = FALSE)
+  )
+
+```
+
+Next step: 
+
+Try one more join (of just the missing points) with FACLOCID to see if there are a few more that could get labeled. 
+
+HAVE NOT TRIED PAST THIS
+```{r}
+# Remove geometry before exporting
+#assets_output <- assets_joined %>%
+#  st_drop_geometry()
+```
+
+
+```{r}
+# Write result to Excel
+#write_xlsx(
+#  assets_output,
+#  output_excel
+#)
+
+#cat("Done. Output saved to:", output_excel)
+```
+
