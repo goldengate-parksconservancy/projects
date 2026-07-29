@@ -6,6 +6,7 @@ date: "7/20/2026"
 ---
 
 ## Set up
+
 ```{r}
 library(tidyverse)
 library(sf)
@@ -13,6 +14,8 @@ library(readxl)
 library(leaflet)
 library(writexl)
 library(testthat)
+
+library(RecordLinkage) # for the string matching 
 ```
 
 ```{r}
@@ -27,9 +30,10 @@ excel_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservanc
 output_excel <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned-with-flag.xlsx"
 ```
 
-
 ## Read in data
+
 ### Asset polygon layer with cultural resource information
+
 ```{r}
 # Read polygon layer
 buildings <- st_read(
@@ -46,7 +50,19 @@ buildings <- buildings |>
 names(buildings)
 ```
 
-### GOGA asset tabular data 
+```{r}
+# Clean building data to match definition query in layer package
+buildings <- buildings |> 
+  # Filter to buildings in park
+  filter(InPark == "Yes") |> 
+  # filter out Decommissioned
+  filter(!BLDGSTATUS %in% c("Decommissioned")) #|> 
+  # Planned and proposed
+ #  filter(!BLDGSTATUS %in% c("Proposed","Planned")) 
+```
+
+### GOGA asset tabular data
+
 ```{r}
 # Read asset spreadsheet
 assets <- read_excel(excel_path, sheet = "Sheet1")
@@ -87,6 +103,7 @@ assets_sf <- st_transform(
 ```
 
 ### Finding ways to fill in missing data
+
 ```{r}
 # MIGHT NOT USE
 goga_buildings_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/GOGA_Buildings.gdb"
@@ -117,8 +134,8 @@ matches_buildings <- assets_missing_point |>
 
 80 rows within assets dataset do not have a lat lon point. Of those 80, only 7 have a matching Location ID within GOGA_Buildings dataset and 1 has a matching Location ID within buildings dataset. Need to decide if its worth it? Might be wiser to go through and assign lat lon point to missing rows
 
-
 ## Visual Check
+
 ```{r}
 # Get buildings dataset in form for leaflet map
 buildings_leaflet <- buildings |>
@@ -168,6 +185,7 @@ leaflet() |>
 ```
 
 ## Join by FACLOCID number
+
 ```{r}
 # Make polygons valid 
 buildings_fixed <- st_make_valid(buildings_leaflet)
@@ -191,7 +209,12 @@ assets_facloc_joined <- assets_facloc |>
 # View how many tagged
 sum(!is.na(assets_facloc_joined$CONTRIBRES))
 ```
+
 424 asset rows were matched with contributing resource tag from matching FACLOCID number
+
+NOTE: Only 399 assets were matched once buildings dataset took on definition query. From a check in assets dataset, 52 assets are of Status = PLANNED. In a check of contributing resource flag within buildings, all planned or proposed buildings did not have a contributing resource flag == yes (most were no). I think because of that reason, I will wait to remove these polygons until after this join to capture these likely No labels.
+
+When I re ran the code when only filtered out Decommissioned assets in buildings dataset, it matched 402 assets by FACLOCID.
 
 ```{r}
 # Recreate map with only missed tagged points 
@@ -244,7 +267,49 @@ leaflet() |>
 
 There are still plenty of points that could be matched by the spatial join.
 
+## Testing out a join via approximate string matches for asset names
+
+First attempt: Jaro-winkler
+
+Jaro-Winkler Similarity measures the number of characters between strings that need to be edited for the strings to match, while giving more weight to the first half of the strings. I think this strategy could be helpful for the weird set of numbers that appears in some of the asset names in assets_sf (ex.(PE1630))
+
+My thought is that we could first use it to find exact names, then see when the score is higher than 0.8, and then also maybe use it as a way to flag items within the spatial join?
+
+Data: For this trial I am going to use assets$Descriptions as one group and buildings_fixed$RESNAME as the other. Which means this is all of the all fo the assets, even the ones that do not contain lat lon points in hope that we can find a match
+
+```{r}
+# Write function to calculate Jaro-Winkler similailty using RecordLinkage package
+approxMatch = function(base_series, reference_series){
+  # base_series = column of names in one dataset
+  # reference_series = column of names in other dataset
+  # function returns a dataframe in which: 
+  # 1st column is base_series text 
+  # 2nd column contains what the algorithm believes is the match based on J-W similarity score
+  # 3rd column is J-W score
+  # 4th column indicates whether the match is an exact(TRUE) or approximate (FALSE) match
+  base_series = sort(unique(base_series)) # filter only unique items from one of the series 
+  reference_series = sort(unique(reference_series)) # and sort alphabetically
+  
+  matches = as.data.frame(base_series)
+  matches$matched = NA # create empty column of matched base_series
+  matches$similarity = NA
+  for (i in 1:nrow(matches)){
+    sim_scores = list()
+    for (building_name in reference_series){
+      sim_scores = append(sim_scores, jarowinkler(matches$base_series[i], building_name))
+    } # loop through base series and create list of Jaro-Winkler similarity scores 
+    matches$similarity[i] = max(unlist(sim_scores)) # return the highest similarity scores
+    matches$matched[i] = reference_series[which(sim_scores == max(unlist(sim_scores)))]
+    # take the item name corresponding to the highest similarity score 
+  }
+  matches$absolute = ifelse(matches[,1] == matches$matched, TRUE, FALSE)
+  return(matches)
+}
+
+```
+
 ## Spatial join for the untagged set
+
 ```{r}
 # Perform spatial join 
 assets_spatial <- st_join(
@@ -265,9 +330,11 @@ assets_spatial <- assets_spatial |>
 sum(!is.na(assets_spatial$CONTRIBRES))
 
 ```
+
 Only 332 rows out of 1387 (23%) are missing the contributing resource tag.
 
-## Recombine data 
+## Recombine data
+
 ```{r}
 # Get rows from left join that did not result in NA value
 assets_facloc_tagged <- assets_facloc_joined |>
@@ -291,14 +358,11 @@ assets_final <- bind_rows(assets_sp_left_join, assets_missing_point) |>
 # })
 # COMMENTED OUT FOR RUNNING PURPOSES
 ```
-Error message: 
-── Failure: Final dataset has same number of rows as original asset dataset ──────────────────────────────────────────────────────────────
-Expected `nrow(assets_final)` to equal `nrow(assets)`.
-Differences:
-1/1 mismatches
-[1] 1442 - 1387 == 55
+
+Error message: ── Failure: Final dataset has same number of rows as original asset dataset ────────────────────────────────────────────────────────────── Expected `nrow(assets_final)` to equal `nrow(assets)`. Differences: 1/1 mismatches \[1\] 1442 - 1387 == 55
 
 ## Figure out error
+
 ```{r}
 # Find duplicate FACLOCID 
 buildings_fixed |>
@@ -310,6 +374,7 @@ buildings_fixed |>
 ```
 
 There are 44 different FACLOCID numbers that appear more than once
+
 ```{r}
 # Did the FACLOCID join increase the row count?
 nrow(assets_facloc)
@@ -319,10 +384,11 @@ nrow(assets_facloc_joined)
 nrow(assets_needing_spatial)
 nrow(assets_spatial)
 ```
-The FACLOCID join increased the row count by 39
-The spatial join increased the row count by 16
+
+The FACLOCID join increased the row count by 39 The spatial join increased the row count by 16
 
 ## Fix duplicated rows from the joins
+
 ```{r}
 # Find rows that got duplicated
 dup_rowids <- assets_final |>
@@ -383,6 +449,7 @@ test_that("Final dataset has same number of rows as original asset dataset", {
 ```
 
 ## Final clean and export
+
 ```{r}
 # Clean columns for export
 assets_final_dedup <- assets_final_dedup |> 
