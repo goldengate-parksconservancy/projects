@@ -308,6 +308,57 @@ approxMatch = function(base_series, reference_series){
 
 ```
 
+```{r}
+# Test function 
+matches = approxMatch(assets$Description, buildings_fixed$RESNAME)
+View(matches)
+```
+
+First impressions are that this might work! Confirmed that it gets the exact matches (score = 1.0). Might need to look into why when a match is not made (reference_series = blank), it still says that the similarity score is ~ 0.6722222
+
+Second attempt: Clean names before running function
+- lower case all words
+- remove punctuation
+- XX-XXX
+- RNXXX
+FBR-XXX
+
+```{r}
+# Created cleaned name column in assets
+assets <- assets |> 
+  # duplicate the Description column
+  mutate(Description_CLEAN = Description) |> 
+  # convert text to all upper case
+  mutate(Description_CLEAN = toupper(Description_CLEAN)) |> 
+  # remove punctuation and replace with an empty space
+  mutate(Description_CLEAN = str_replace_all(Description_CLEAN,"[^A-Z0-9 ]", " ")) |> 
+  # remove leading and extra white space
+  mutate(Description_CLEAN = str_squish(Description_CLEAN)) |> 
+  # relocate column for comparison
+  relocate(Description_CLEAN, .after = Description)
+
+# Created cleaned name column in buildings 
+buildings_fixed <- buildings_fixed |> 
+  # duplicate the RESNAME column 
+  mutate(RESNAME_CLEAN = RESNAME) |> 
+   # convert text to all upper case
+  mutate(RESNAME_CLEAN = toupper(RESNAME_CLEAN)) |> 
+  # remove punctuation and replace with an empty space
+  mutate(RESNAME_CLEAN = str_replace_all(RESNAME_CLEAN,"[^A-Z0-9 ]", " ")) |> 
+  # remove leading and extra white space
+  mutate(RESNAME_CLEAN = str_squish(RESNAME_CLEAN)) |> 
+  # relocate column for comparison
+  relocate(RESNAME_CLEAN, .after = RESNAME)
+```
+
+```{r}
+# Test function after cleaning 
+matches_post_cleaning = approxMatch(assets$Description_CLEAN, buildings_fixed$RESNAME_CLEAN)
+View(matches_post_cleaning)
+```
+
+This version of running the function was a lot more successful as each asset in assets dataset was matched with a name in buildings. 
+
 ## Spatial join for the untagged set
 
 ```{r}
@@ -469,3 +520,302 @@ assets_final_dedup <- assets_final_dedup |>
 # 
 # cat("Done. Output saved to:", output_excel)
 ```
+
+
+
+# FRESH START -----
+
+## Set up
+
+```{r}
+library(tidyverse)
+library(sf)
+library(readxl)
+library(leaflet)
+library(writexl)
+library(testthat)
+
+library(RecordLinkage) # for the string matching 
+```
+
+```{r}
+# Data File paths
+
+gdb_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/CCVA-asset-classifcation.gdb"
+
+fc_name <- "GOGA_FACILITY_BuildingsAndStructures_py_20260520_ExportFeatures"
+
+excel_path <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned.xlsx"
+
+output_excel <- "C:/Users/jsibley/OneDrive - Golden Gate National Parks Conservancy/Documents/Code/projects/ccva/data/goga-assets-cleaned-with-flag.xlsx"
+```
+
+## Read in data
+
+### Asset polygon layer with cultural resource information
+
+```{r}
+# Read polygon layer
+buildings <- st_read(
+  dsn = gdb_path,
+  layer = fc_name,
+  quiet = FALSE
+)
+
+# Transform CRS to WGS84 
+buildings <- buildings |> 
+  st_transform(4326) 
+
+# Check field names
+names(buildings)
+```
+
+```{r}
+# REMOVE DECOMISSIONED BUILDINGS ----
+# Clean building data to match definition query in layer package (only decomissioned o start, the other part will be filtered before the spatial join )
+buildings <- buildings |> 
+  # Filter to buildings in park
+  filter(InPark == "Yes") |> 
+  # filter out Decommissioned
+  filter(!BLDGSTATUS %in% c("Decommissioned")) 
+
+# PREP FOR JARO-WINKLER SIMILARITY TEST ----
+# Created cleaned name column in buildings 
+buildings <- buildings |> 
+  # duplicate the RESNAME column 
+  mutate(RESNAME_CLEAN = RESNAME) |> 
+   # convert text to all upper case
+  mutate(RESNAME_CLEAN = toupper(RESNAME_CLEAN)) |> 
+  # remove punctuation and replace with an empty space
+  mutate(RESNAME_CLEAN = str_replace_all(RESNAME_CLEAN,"[^A-Z0-9 ]", " ")) |> 
+  # remove leading and extra white space
+  mutate(RESNAME_CLEAN = str_squish(RESNAME_CLEAN)) |> 
+  # relocate column for comparison
+  relocate(RESNAME_CLEAN, .after = RESNAME)
+```
+
+### GOGA asset tabular data
+
+```{r}
+# Read asset spreadsheet
+assets <- read_excel(excel_path, sheet = "Sheet1")
+
+# Remove characters (+) from lat and lon columns and convert to numeric
+assets <- assets |> 
+  mutate(
+    PrimaryLatitude = gsub("\\+", "", PrimaryLatitude),
+    PrimaryLongitude = gsub("\\+", "", PrimaryLongitude))|>
+  mutate(PrimaryLatitude = as.numeric(PrimaryLatitude),
+         PrimaryLongitude = as.numeric(PrimaryLongitude)) |> 
+  # rename Location to LocationID
+  rename(LocationID = Location)
+
+# Create rowID column to maintain row order at the end
+assets <- assets |> 
+  mutate(RowID = row_number())
+
+
+# PREP FOR JARO-WINKLER SIMILARITY TEST ----
+# Created cleaned name column in assets
+assets <- assets |> 
+  # duplicate the Description column
+  mutate(Description_CLEAN = Description) |> 
+  # convert text to all upper case
+  mutate(Description_CLEAN = toupper(Description_CLEAN)) |> 
+  # remove punctuation and replace with an empty space
+  mutate(Description_CLEAN = str_replace_all(Description_CLEAN,"[^A-Z0-9 ]", " ")) |> 
+  # remove leading and extra white space
+  mutate(Description_CLEAN = str_squish(Description_CLEAN)) |> 
+  # relocate column for comparison
+  relocate(Description_CLEAN, .after = Description)
+```
+
+
+```{r}
+# For visual check 
+# Filter out rows that are missing lat lon points 
+assets_point <- assets |> 
+  filter(!is.na(PrimaryLatitude) | !is.na(PrimaryLongitude))
+
+# Convert spreadsheet coordinates to sf points
+assets_sf <- st_as_sf(
+  assets_point,
+  coords = c("PrimaryLongitude", "PrimaryLatitude"),
+  crs = 4326,      # WGS84 lat/long
+  remove = FALSE
+)
+
+# Reproject points to polygon CRS (WGS84)
+assets_sf <- st_transform(
+  assets_sf,
+  st_crs(buildings)
+)
+```
+
+## Visual Check
+
+```{r}
+# Get buildings dataset in form for leaflet map
+buildings_leaflet <- buildings |>
+  st_zm() |>
+  st_cast("MULTIPOLYGON") 
+
+# Create map
+#--------------------------------------------------
+leaflet() |> 
+  
+  addProviderTiles(providers$Esri.WorldImagery, group = "Aerial") |> 
+  
+  addProviderTiles(providers$CartoDB.Positron, group = "Basemap") |> 
+  
+  addPolygons(
+    data = buildings_leaflet,
+    color = "blue",
+    weight = 1,
+    fillOpacity = 0.3,
+     popup = ~ paste(
+       "<b>Resource Name:</b>", RESNAME,
+       "<b>Contributing Resource Flag:</b>", CONTRIBRES
+    ),
+    group = "Resource Polygons"
+  ) |> 
+  
+   addCircleMarkers(
+    data = assets_sf,
+    radius = 4,
+    color = "red",
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    popup = ~ paste(
+      "<b>Description:</b>", Description,
+      "<b>Latitude:</b>",PrimaryLatitude,
+      "<br><b>Longitude:</b>",PrimaryLongitude
+    ),
+    group = "Asset Points"
+   ) |> 
+  
+   addLayersControl(
+     overlayGroups = c("Resource Polygons", "Asset Points"),
+     baseGroups = c("Aerial", "Basemap"),
+     options = layersControlOptions(collapsed = FALSE)
+  )
+
+```
+
+## Join by FACLOCID number
+```{r}
+# Make polygons valid 
+buildings_fixed <- st_make_valid(buildings_leaflet)
+
+# Clean FACLOCID in buildings_fixed (to account for the duplicate id numbers that appear)
+# From an examaninaton and cross checking the first number in the series is the current ID
+buildings_fixed <- buildings_fixed |> 
+  mutate(FACLOCID = sub(";.*", "", FACLOCID))
+
+# Rename LocationID column to be FACLOCID for join
+assets_facloc <- assets |>
+  rename(FACLOCID = LocationID)
+
+# Perform left join to match asset data to CONTRIBRES column by matching ID 
+assets_facloc_joined <- assets_facloc |>
+  left_join(buildings_fixed |>
+              st_drop_geometry() |>
+              # include RESNAME_CLEAN and BLDGALTNAME for JW check
+              select(FACLOCID, CONTRIBRES, RESNAME_CLEAN, BLDGALTNAME), 
+            by = "FACLOCID")
+
+# View how many tagged
+sum(!is.na(assets_facloc_joined$CONTRIBRES))
+```
+
+### Check FACLOCID join using a Jaro-Winkler Similarity test
+In order to better confirm that the LocationID/FACLOCID match actually matched the correct assets together, the names of the buildings in the two datasets (Description_CLEAN and RESNAME_CLEAN) will be compared for a given row. The '_CLEAN' version of the building names will be used as it works better with the JW test
+
+```{r}
+# Filter assets_facloc_joined to rows where CONTRIBRES is not NA
+assets_facloc_check <- assets_facloc_joined |>
+  filter(!is.na(CONTRIBRES))
+
+# Calculate Jaro-Winkler similarity between Description_CLEAN and RESNAME_CLEAN
+assets_facloc_check <- assets_facloc_check |>
+  mutate(jw_score = mapply(RecordLinkage::jarowinkler, Description_CLEAN, RESNAME_CLEAN))
+
+# Filter to the Jaro-Winkler score of less than 0.90 for review
+assets_facloc_review <- assets_facloc_check |>
+  filter(jw_score < 0.90) |>
+  select(
+    FACLOCID,
+    Description_CLEAN,
+    RESNAME_CLEAN,
+    
+    jw_score,
+    everything()
+  )
+
+View(assets_facloc_review)
+```
+
+FACLOCID numbers to flag: 
+40834
+Description: PARKING LOT BATTERY ALEXANDER
+Resname: QUARTERS 804A
+
+Found in data of this asset: "This feature is incorrectly described as "Battery Alexander parking lot" in FMSS."
+
+
+## Spatial join for the untagged set
+
+Note for self: This join will remove rows that do not contain lat lon points. I should be okay when I recombine everything at the end because these rows are included in the first ID join.
+```{r}
+# Clean buildings dataset to not include planned or proposed buildings 
+buildings_fixed_current <- buildings_fixed |> 
+  # Planned and proposed
+   filter(!BLDGSTATUS %in% c("Proposed","Planned")) 
+```
+
+
+```{r}
+# Filter to rows that do not contain contribres tag
+assets_needing_spatial <- assets_facloc_joined |>
+  filter(is.na(CONTRIBRES))
+
+
+# Turn assets data into spatial points ----
+# Filter out rows that are missing lat lon points 
+assets_needing_spatial <- assets_needing_spatial|> 
+  filter(!is.na(PrimaryLatitude) | !is.na(PrimaryLongitude))
+
+# Convert spreadsheet coordinates to sf points
+assets_spatial_sf <- st_as_sf(
+  assets_needing_spatial,
+  coords = c("PrimaryLongitude", "PrimaryLatitude"),
+  crs = 4326,      # WGS84 lat/long
+  remove = FALSE
+)
+
+# Reproject points to polygon CRS (WGS84)
+assets_spatial_sf <- st_transform(
+  assets_sf,
+  st_crs(buildings)
+)
+
+# Perform spatial join 
+assets_spatial_join <- st_join(
+  assets_spatial_sf,
+  buildings_fixed_current |> 
+    select(CONTRIBRES),
+  join = st_within,
+  left = TRUE
+)
+
+# Combine 2 CONTRIBRES columns 
+assets_spatial_join <- assets_spatial_join |>
+  mutate(CONTRIBRES = coalesce(CONTRIBRES.x, CONTRIBRES.y)) |> 
+  # remove x and y column 
+  select(c(-CONTRIBRES.x, -CONTRIBRES.y))
+
+# View how many are still untagged (there should def be a decent amount from visual check in maps)
+sum(!is.na(assets_spatial_join$CONTRIBRES))
+
+```
+
